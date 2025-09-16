@@ -222,20 +222,20 @@ def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1)
 
     video_hash = generate_file_hash(input_video)
 
-    for i, (start, end) in enumerate(segments):
-        chain = SubElement(root, 'chain', {'id': f'chain{i}', 'out': format_time(duration_secs)})
-        SubElement(chain, 'property', {'name': 'length'}).text = format_time(duration_secs)
-        SubElement(chain, 'property', {'name': 'eof'}).text = 'pause'
-        SubElement(chain, 'property', {'name': 'resource'}).text = video_filename
-        SubElement(chain, 'property', {'name': 'mlt_service'}).text = 'avformat-novalidate'
-        SubElement(chain, 'property', {'name': 'seekable'}).text = '1'
-        SubElement(chain, 'property', {'name': 'audio_index'}).text = '1'
-        SubElement(chain, 'property', {'name': 'video_index'}).text = '0'
-        SubElement(chain, 'property', {'name': 'mute_on_pause'}).text = '0'
-        SubElement(chain, 'property', {'name': 'shotcut:hash'}).text = video_hash
-        SubElement(chain, 'property', {'name': 'ignore_points'}).text = '0'
-        SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = video_filename
-        SubElement(chain, 'property', {'name': 'xml'}).text = 'was here'
+    # Create a single chain for the video file
+    chain = SubElement(root, 'chain', {'id': 'chain0', 'out': format_time(duration_secs)})
+    SubElement(chain, 'property', {'name': 'length'}).text = format_time(duration_secs)
+    SubElement(chain, 'property', {'name': 'eof'}).text = 'pause'
+    SubElement(chain, 'property', {'name': 'resource'}).text = video_filename
+    SubElement(chain, 'property', {'name': 'mlt_service'}).text = 'avformat-novalidate'
+    SubElement(chain, 'property', {'name': 'seekable'}).text = '1'
+    SubElement(chain, 'property', {'name': 'audio_index'}).text = '1'
+    SubElement(chain, 'property', {'name': 'video_index'}).text = '0'
+    SubElement(chain, 'property', {'name': 'mute_on_pause'}).text = '0'
+    SubElement(chain, 'property', {'name': 'shotcut:hash'}).text = video_hash
+    SubElement(chain, 'property', {'name': 'ignore_points'}).text = '0'
+    SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = video_filename
+    SubElement(chain, 'property', {'name': 'xml'}).text = 'was here'
 
     playlist = SubElement(root, 'playlist', {'id': 'playlist0', 'title': 'V1'})
     SubElement(playlist, 'property', {'name': 'shotcut:video'}).text = '1'
@@ -247,7 +247,7 @@ def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1)
         out_time = end if is_last else end - frame_duration
         if out_time < start:
             out_time = start
-        SubElement(playlist, 'entry', {'producer': f'chain{i}', 'in': format_time(start), 'out': format_time(out_time)})
+        SubElement(playlist, 'entry', {'producer': 'chain0', 'in': format_time(start), 'out': format_time(out_time)})
 
     tractor = SubElement(root, 'tractor', {
         'id': 'tractor0', 
