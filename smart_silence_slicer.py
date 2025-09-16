@@ -17,29 +17,52 @@ def generate_file_hash(filepath):
         hasher.update(buf)
     return hasher.hexdigest()
 
-def detect_silences(input_video, threshold="-50dB", duration=0.25):
+def detect_silences(input_video, start_threshold="-50dB", end_threshold="-40dB", duration=0.25):
     """
-    Detect silences in a video file using ffmpeg.
+    Detect silences using separate thresholds for start and end.
     Returns a list of (start, end) tuples for silent sections.
     """
-    command = [
-        'ffmpeg',
-        '-i', input_video,
-        '-af', f'silencedetect=noise={threshold}:d={duration}',
-        '-f', 'null',
-        '-'
+    # Get starts with the sensitive threshold for when silence begins
+    start_command = [
+        'ffmpeg', '-i', input_video,
+        '-af', f'silencedetect=noise={start_threshold}:d={duration}',
+        '-f', 'null', '-'
     ]
-    
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    output = result.stderr
-    
-    starts = re.findall(r'silence_start: (\d+\.?\d*)', output)
-    ends = re.findall(r'silence_end: (\d+\.?\d*)', output)
-    
+    start_result = subprocess.run(start_command, capture_output=True, text=True, check=False)
+    start_times = [float(t) for t in re.findall(r'silence_start: (\d+\.?\d*)', start_result.stderr)]
+
+    # Get ends with the louder threshold for when audio resumes
+    end_command = [
+        'ffmpeg', '-i', input_video,
+        '-af', f'silencedetect=noise={end_threshold}:d={duration}',
+        '-f', 'null', '-'
+    ]
+    end_result = subprocess.run(end_command, capture_output=True, text=True, check=False)
+    end_times = [float(t) for t in re.findall(r'silence_end: (\d+\.?\d*)', end_result.stderr)]
+
+    # Pair up the start and end times
     silences = []
-    for i in range(len(starts)):
-        silences.append((float(starts[i]), float(ends[i])))
-        
+    starts_iter = iter(start_times)
+    ends_iter = iter(end_times)
+    
+    current_start = next(starts_iter, None)
+    current_end = next(ends_iter, None)
+    
+    while current_start is not None and current_end is not None:
+        # Find an end time that is after the current start time
+        while current_end is not None and current_end <= current_start:
+            current_end = next(ends_iter, None)
+
+        if current_end is None:
+            break  # No more valid end times
+
+        # We have a valid pair
+        silences.append((current_start, current_end))
+
+        # Find the next start time that is after the current end time
+        while current_start is not None and current_start <= current_end:
+            current_start = next(starts_iter, None)
+            
     return silences
 
 def get_video_info(input_video):
@@ -209,17 +232,21 @@ def create_mlt_file(input_video, silences, video_info):
 
 def main():
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <video_file>")
+        print(f"Usage: {sys.argv[0]} <video_file> [start_db] [end_db]")
+        print("  start_db: Threshold for silence start (e.g., -50, default: -50).")
+        print("  end_db:   Threshold for silence end (e.g., -40, default: -40).")
         sys.exit(1)
         
     input_video = sys.argv[1]
+    start_threshold = sys.argv[2] if len(sys.argv) > 2 else "-50"
+    end_threshold = sys.argv[3] if len(sys.argv) > 3 else "-40"
     
     if not os.path.exists(input_video):
         print(f"Error: File not found at {input_video}")
         sys.exit(1)
         
     print("Detecting silences...")
-    silences = detect_silences(input_video)
+    silences = detect_silences(input_video, start_threshold=f"{start_threshold}dB", end_threshold=f"{end_threshold}dB")
     print(f"Found {len(silences)} silence(s).")
     
     print("Getting video info...")
