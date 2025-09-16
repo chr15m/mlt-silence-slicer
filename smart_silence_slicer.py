@@ -108,7 +108,7 @@ def format_time(seconds):
     
     return f"{h:02d}:{m:02d}:{s:02d}.{millis:03d}"
 
-def create_mlt_file(input_video, silences, video_info):
+def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1):
     """
     Create an MLT file with clips split at silence boundaries.
     """
@@ -125,10 +125,22 @@ def create_mlt_file(input_video, silences, video_info):
     
     sorted_points = sorted(list(split_points))
     
-    # Create segments from split points
+    # Filter out points that create segments shorter than min_segment_duration
+    filtered_points = [sorted_points[0]]
+    for i in range(1, len(sorted_points)):
+        if sorted_points[i] - filtered_points[-1] >= min_segment_duration:
+            filtered_points.append(sorted_points[i])
+    
+    if len(filtered_points) > 1 and duration_secs - filtered_points[-1] < min_segment_duration:
+        filtered_points.pop()
+        
+    if filtered_points[-1] != duration_secs:
+        filtered_points.append(duration_secs)
+
+    # Create segments from the filtered points
     segments = []
-    for i in range(len(sorted_points) - 1):
-        start, end = sorted_points[i], sorted_points[i+1]
+    for i in range(len(filtered_points) - 1):
+        start, end = filtered_points[i], filtered_points[i+1]
         if end > start:
             segments.append((start, end))
 
@@ -232,14 +244,17 @@ def create_mlt_file(input_video, silences, video_info):
 
 def main():
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <video_file> [onset_db] [offset_db]")
+        print(f"Usage: {sys.argv[0]} <video_file> [onset_db] [offset_db] [min_duration_ms]")
         print("  onset_db:  Threshold for sound onset (silence end) (e.g., -40, default: -40).")
         print("  offset_db: Threshold for sound offset (silence start) (e.g., -50, default: -50).")
+        print("  min_duration_ms: Minimum segment duration in ms (e.g., 100, default: 100).")
         sys.exit(1)
         
     input_video = sys.argv[1]
     onset_threshold = sys.argv[2] if len(sys.argv) > 2 else "-40"
     offset_threshold = sys.argv[3] if len(sys.argv) > 3 else "-50"
+    min_duration_ms = int(sys.argv[4]) if len(sys.argv) > 4 else 100
+    min_segment_duration = min_duration_ms / 1000.0
     
     if not os.path.exists(input_video):
         print(f"Error: File not found at {input_video}")
@@ -253,7 +268,7 @@ def main():
     video_info = get_video_info(input_video)
     
     print("Creating MLT file...")
-    create_mlt_file(input_video, silences, video_info)
+    create_mlt_file(input_video, silences, video_info, min_segment_duration=min_segment_duration)
 
 if __name__ == '__main__':
     main()
