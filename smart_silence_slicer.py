@@ -17,51 +17,51 @@ def generate_file_hash(filepath):
         hasher.update(buf)
     return hasher.hexdigest()
 
-def detect_silences(input_video, start_threshold="-50dB", end_threshold="-40dB", duration=0.25):
+def detect_silences(input_video, onset_threshold="-40dB", offset_threshold="-50dB", duration=0.25):
     """
-    Detect silences using separate thresholds for start and end.
-    Returns a list of (start, end) tuples for silent sections.
+    Detect silences using separate thresholds for sound offset and onset.
+    Returns a list of (offset, onset) tuples for silent sections.
     """
-    # Get starts with the sensitive threshold for when silence begins
-    start_command = [
+    # Get sound offsets (silence starts) with the sensitive threshold
+    offset_command = [
         'ffmpeg', '-i', input_video,
-        '-af', f'silencedetect=noise={start_threshold}:d={duration}',
+        '-af', f'silencedetect=noise={offset_threshold}:d={duration}',
         '-f', 'null', '-'
     ]
-    start_result = subprocess.run(start_command, capture_output=True, text=True, check=False)
-    start_times = [float(t) for t in re.findall(r'silence_start: (\d+\.?\d*)', start_result.stderr)]
+    offset_result = subprocess.run(offset_command, capture_output=True, text=True, check=False)
+    offset_times = [float(t) for t in re.findall(r'silence_start: (\d+\.?\d*)', offset_result.stderr)]
 
-    # Get ends with the louder threshold for when audio resumes
-    end_command = [
+    # Get sound onsets (silence ends) with the louder threshold
+    onset_command = [
         'ffmpeg', '-i', input_video,
-        '-af', f'silencedetect=noise={end_threshold}:d={duration}',
+        '-af', f'silencedetect=noise={onset_threshold}:d={duration}',
         '-f', 'null', '-'
     ]
-    end_result = subprocess.run(end_command, capture_output=True, text=True, check=False)
-    end_times = [float(t) for t in re.findall(r'silence_end: (\d+\.?\d*)', end_result.stderr)]
+    onset_result = subprocess.run(onset_command, capture_output=True, text=True, check=False)
+    onset_times = [float(t) for t in re.findall(r'silence_end: (\d+\.?\d*)', onset_result.stderr)]
 
-    # Pair up the start and end times
+    # Pair up the offset and onset times
     silences = []
-    starts_iter = iter(start_times)
-    ends_iter = iter(end_times)
+    offsets_iter = iter(offset_times)
+    onsets_iter = iter(onset_times)
     
-    current_start = next(starts_iter, None)
-    current_end = next(ends_iter, None)
+    current_offset = next(offsets_iter, None)
+    current_onset = next(onsets_iter, None)
     
-    while current_start is not None and current_end is not None:
-        # Find an end time that is after the current start time
-        while current_end is not None and current_end <= current_start:
-            current_end = next(ends_iter, None)
+    while current_offset is not None and current_onset is not None:
+        # Find an onset time that is after the current offset time
+        while current_onset is not None and current_onset <= current_offset:
+            current_onset = next(onsets_iter, None)
 
-        if current_end is None:
-            break  # No more valid end times
+        if current_onset is None:
+            break  # No more valid onset times
 
         # We have a valid pair
-        silences.append((current_start, current_end))
+        silences.append((current_offset, current_onset))
 
-        # Find the next start time that is after the current end time
-        while current_start is not None and current_start <= current_end:
-            current_start = next(starts_iter, None)
+        # Find the next offset time that is after the current onset time
+        while current_offset is not None and current_offset <= current_onset:
+            current_offset = next(offsets_iter, None)
             
     return silences
 
@@ -232,21 +232,21 @@ def create_mlt_file(input_video, silences, video_info):
 
 def main():
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <video_file> [start_db] [end_db]")
-        print("  start_db: Threshold for silence start (e.g., -50, default: -50).")
-        print("  end_db:   Threshold for silence end (e.g., -40, default: -40).")
+        print(f"Usage: {sys.argv[0]} <video_file> [onset_db] [offset_db]")
+        print("  onset_db:  Threshold for sound onset (silence end) (e.g., -40, default: -40).")
+        print("  offset_db: Threshold for sound offset (silence start) (e.g., -50, default: -50).")
         sys.exit(1)
         
     input_video = sys.argv[1]
-    start_threshold = sys.argv[2] if len(sys.argv) > 2 else "-50"
-    end_threshold = sys.argv[3] if len(sys.argv) > 3 else "-40"
+    onset_threshold = sys.argv[2] if len(sys.argv) > 2 else "-40"
+    offset_threshold = sys.argv[3] if len(sys.argv) > 3 else "-50"
     
     if not os.path.exists(input_video):
         print(f"Error: File not found at {input_video}")
         sys.exit(1)
         
     print("Detecting silences...")
-    silences = detect_silences(input_video, start_threshold=f"{start_threshold}dB", end_threshold=f"{end_threshold}dB")
+    silences = detect_silences(input_video, offset_threshold=f"{offset_threshold}dB", onset_threshold=f"{onset_threshold}dB")
     print(f"Found {len(silences)} silence(s).")
     
     print("Getting video info...")
