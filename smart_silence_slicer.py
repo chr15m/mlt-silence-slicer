@@ -6,8 +6,52 @@ import re
 import os
 import json
 import hashlib
+import threading
+import queue
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
+
+def _run_ffmpeg_and_get_times(command, regex_pattern, label):
+    """
+    Run an ffmpeg command, parse its stderr for timestamps, and show progress.
+    """
+    def reader_thread(pipe, q):
+        try:
+            for line in iter(pipe.readline, ''):
+                q.put(line)
+        finally:
+            pipe.close()
+
+    times = []
+    spinner = ['-', '\\', '|', '/']
+    spinner_idx = 0
+    
+    process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True, universal_newlines=True)
+    q = queue.Queue()
+    thread = threading.Thread(target=reader_thread, args=(process.stderr, q))
+    thread.start()
+
+    while process.poll() is None or not q.empty():
+        try:
+            line = q.get(timeout=0.1)
+            match = re.search(regex_pattern, line)
+            if match:
+                time_val = float(match.group(1))
+                times.append(time_val)
+                sys.stdout.write(f"\r{label}: Found {len(times)} ({time_val:.3f}s)          ")
+                sys.stdout.flush()
+        except queue.Empty:
+            if process.poll() is None: # Only spin if process is still running
+                sys.stdout.write(f"\r{label}: {spinner[spinner_idx % 4]}          ")
+                sys.stdout.flush()
+                spinner_idx += 1
+    
+    thread.join()
+    
+    sys.stdout.write(f"\r{label}: Found {len(times)} total.                          \n")
+    sys.stdout.flush()
+    
+    return sorted(times)
 
 def generate_file_hash(filepath):
     """Generate a hash for a file."""
@@ -17,7 +61,7 @@ def generate_file_hash(filepath):
         hasher.update(buf)
     return hasher.hexdigest()
 
-def detect_silences(input_video, onset_threshold="-40dB", offset_threshold="-50dB", duration=0.25):
+def detect_silences(input_video, onset_threshold="-50dB", offset_threshold="-50dB", duration=0.25):
     """
     Detect silences using separate thresholds for sound offset and onset.
     Returns a list of (offset, onset) tuples for silent sections.
@@ -28,8 +72,7 @@ def detect_silences(input_video, onset_threshold="-40dB", offset_threshold="-50d
         '-af', f'silencedetect=noise={offset_threshold}:d={duration}',
         '-f', 'null', '-'
     ]
-    offset_result = subprocess.run(offset_command, capture_output=True, text=True, check=False)
-    offset_times = [float(t) for t in re.findall(r'silence_start: (\d+\.?\d*)', offset_result.stderr)]
+    offset_times = _run_ffmpeg_and_get_times(offset_command, r'silence_start: (\d+\.?\d*)', "Detecting offsets")
 
     # Get sound onsets (silence ends) with the louder threshold
     onset_command = [
@@ -37,8 +80,7 @@ def detect_silences(input_video, onset_threshold="-40dB", offset_threshold="-50d
         '-af', f'silencedetect=noise={onset_threshold}:d={duration}',
         '-f', 'null', '-'
     ]
-    onset_result = subprocess.run(onset_command, capture_output=True, text=True, check=False)
-    onset_times = [float(t) for t in re.findall(r'silence_end: (\d+\.?\d*)', onset_result.stderr)]
+    onset_times = _run_ffmpeg_and_get_times(onset_command, r'silence_end: (\d+\.?\d*)', "Detecting onsets")
 
     # Pair up the offset and onset times
     silences = []
@@ -245,13 +287,13 @@ def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1)
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <video_file> [onset_db] [offset_db] [min_duration_ms]")
-        print("  onset_db:  Threshold for sound onset (silence end) (e.g., -40, default: -40).")
+        print("  onset_db:  Threshold for sound onset (silence end) (e.g., -50, default: -50).")
         print("  offset_db: Threshold for sound offset (silence start) (e.g., -50, default: -50).")
         print("  min_duration_ms: Minimum segment duration in ms (e.g., 100, default: 100).")
         sys.exit(1)
         
     input_video = sys.argv[1]
-    onset_threshold = sys.argv[2] if len(sys.argv) > 2 else "-40"
+    onset_threshold = sys.argv[2] if len(sys.argv) > 2 else "-50"
     offset_threshold = sys.argv[3] if len(sys.argv) > 3 else "-50"
     min_duration_ms = int(sys.argv[4]) if len(sys.argv) > 4 else 100
     min_segment_duration = min_duration_ms / 1000.0
@@ -260,7 +302,6 @@ def main():
         print(f"Error: File not found at {input_video}")
         sys.exit(1)
         
-    print("Detecting silences...")
     silences = detect_silences(input_video, offset_threshold=f"{offset_threshold}dB", onset_threshold=f"{onset_threshold}dB")
     print(f"Found {len(silences)} silence(s).")
     
