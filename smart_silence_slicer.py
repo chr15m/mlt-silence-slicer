@@ -8,6 +8,7 @@ import json
 import hashlib
 import threading
 import queue
+import argparse
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
@@ -150,15 +151,10 @@ def format_time(seconds):
     
     return f"{h:02d}:{m:02d}:{s:02d}.{millis:03d}"
 
-def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1):
+def calculate_segments(duration_secs, silences, min_segment_duration=0.1):
     """
-    Create an MLT file with clips split at silence boundaries.
+    Calculate video segments based on silence points.
     """
-    video_filename = os.path.basename(input_video)
-    mlt_path = os.path.splitext(input_video)[0] + '.mlt'
-    
-    duration_secs = video_info['duration']
-    
     # Create split points from silences
     split_points = {0.0, duration_secs}
     for start, end in silences:
@@ -185,6 +181,17 @@ def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1)
         start, end = filtered_points[i], filtered_points[i+1]
         if end > start:
             segments.append((start, end))
+    return segments
+
+def create_mlt_file(video_data, mlt_path):
+    """
+    Create an MLT file with clips from multiple videos.
+    """
+    if not video_data:
+        return
+
+    first_video_info = video_data[0][2]
+    total_duration_secs = sum(end - start for _, segments, _ in video_data for start, end in segments)
 
     root = Element('mlt', {
         'LC_NUMERIC': 'C', 
@@ -195,21 +202,21 @@ def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1)
     
     SubElement(root, 'profile', {
         'description': 'automatic',
-        'width': str(video_info['width']),
-        'height': str(video_info['height']),
+        'width': str(first_video_info['width']),
+        'height': str(first_video_info['height']),
         'progressive': '1',
         'sample_aspect_num': '1', 'sample_aspect_den': '1',
         'display_aspect_num': '16', 'display_aspect_den': '9',
-        'frame_rate_num': str(video_info['frame_rate_num']), 
-        'frame_rate_den': str(video_info['frame_rate_den']),
+        'frame_rate_num': str(first_video_info['frame_rate_num']), 
+        'frame_rate_den': str(first_video_info['frame_rate_den']),
         'colorspace': '709'
     })
     
     main_bin = SubElement(root, 'playlist', {'id': 'main_bin'})
     SubElement(main_bin, 'property', {'name': 'xml_retain'}).text = '1'
 
-    black_producer = SubElement(root, 'producer', {'id': 'black', 'in': '00:00:00.000', 'out': format_time(duration_secs)})
-    SubElement(black_producer, 'property', {'name': 'length'}).text = format_time(duration_secs)
+    black_producer = SubElement(root, 'producer', {'id': 'black', 'in': '00:00:00.000', 'out': format_time(total_duration_secs)})
+    SubElement(black_producer, 'property', {'name': 'length'}).text = format_time(total_duration_secs)
     SubElement(black_producer, 'property', {'name': 'eof'}).text = 'pause'
     SubElement(black_producer, 'property', {'name': 'resource'}).text = '0'
     SubElement(black_producer, 'property', {'name': 'aspect_ratio'}).text = '1'
@@ -218,42 +225,47 @@ def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1)
     SubElement(black_producer, 'property', {'name': 'set.test_audio'}).text = '0'
 
     background = SubElement(root, 'playlist', {'id': 'background'})
-    SubElement(background, 'entry', {'producer': 'black', 'in': '00:00:00.000', 'out': format_time(duration_secs)})
+    SubElement(background, 'entry', {'producer': 'black', 'in': '00:00:00.000', 'out': format_time(total_duration_secs)})
 
-    video_hash = generate_file_hash(input_video)
+    # Create a chain for each video file first
+    for chain_idx, (input_video, segments, video_info) in enumerate(video_data):
+        video_filename = os.path.basename(input_video)
+        video_hash = generate_file_hash(input_video)
+        duration_secs = video_info['duration']
 
-    # Create a single chain for the video file
-    chain = SubElement(root, 'chain', {'id': 'chain0', 'out': format_time(duration_secs)})
-    SubElement(chain, 'property', {'name': 'length'}).text = format_time(duration_secs)
-    SubElement(chain, 'property', {'name': 'eof'}).text = 'pause'
-    SubElement(chain, 'property', {'name': 'resource'}).text = video_filename
-    SubElement(chain, 'property', {'name': 'mlt_service'}).text = 'avformat-novalidate'
-    SubElement(chain, 'property', {'name': 'seekable'}).text = '1'
-    SubElement(chain, 'property', {'name': 'audio_index'}).text = '1'
-    SubElement(chain, 'property', {'name': 'video_index'}).text = '0'
-    SubElement(chain, 'property', {'name': 'mute_on_pause'}).text = '0'
-    SubElement(chain, 'property', {'name': 'shotcut:hash'}).text = video_hash
-    SubElement(chain, 'property', {'name': 'ignore_points'}).text = '0'
-    SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = video_filename
-    SubElement(chain, 'property', {'name': 'xml'}).text = 'was here'
+        chain = SubElement(root, 'chain', {'id': f'chain{chain_idx}', 'out': format_time(duration_secs)})
+        SubElement(chain, 'property', {'name': 'length'}).text = format_time(duration_secs)
+        SubElement(chain, 'property', {'name': 'eof'}).text = 'pause'
+        SubElement(chain, 'property', {'name': 'resource'}).text = video_filename
+        SubElement(chain, 'property', {'name': 'mlt_service'}).text = 'avformat-novalidate'
+        SubElement(chain, 'property', {'name': 'seekable'}).text = '1'
+        SubElement(chain, 'property', {'name': 'audio_index'}).text = '1'
+        SubElement(chain, 'property', {'name': 'video_index'}).text = '0'
+        SubElement(chain, 'property', {'name': 'mute_on_pause'}).text = '0'
+        SubElement(chain, 'property', {'name': 'shotcut:hash'}).text = video_hash
+        SubElement(chain, 'property', {'name': 'ignore_points'}).text = '0'
+        SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = video_filename
+        SubElement(chain, 'property', {'name': 'xml'}).text = 'was here'
 
     playlist = SubElement(root, 'playlist', {'id': 'playlist0', 'title': 'V1'})
     SubElement(playlist, 'property', {'name': 'shotcut:video'}).text = '1'
     SubElement(playlist, 'property', {'name': 'shotcut:name'}).text = 'V1'
     
-    frame_duration = video_info['frame_rate_den'] / video_info['frame_rate_num']
-    for i, (start, end) in enumerate(segments):
-        is_last = (i == len(segments) - 1)
-        out_time = end if is_last else end - frame_duration
-        if out_time < start:
-            out_time = start
-        SubElement(playlist, 'entry', {'producer': 'chain0', 'in': format_time(start), 'out': format_time(out_time)})
+    # Then, create the playlist entries that refer to the chains
+    for chain_idx, (input_video, segments, video_info) in enumerate(video_data):
+        frame_duration = video_info['frame_rate_den'] / video_info['frame_rate_num']
+        for i, (start, end) in enumerate(segments):
+            is_last = (i == len(segments) - 1)
+            out_time = end if is_last else end - frame_duration
+            if out_time < start:
+                out_time = start
+            SubElement(playlist, 'entry', {'producer': f'chain{chain_idx}', 'in': format_time(start), 'out': format_time(out_time)})
 
     tractor = SubElement(root, 'tractor', {
         'id': 'tractor0', 
         'title': 'Shotcut version 22.01.30',
         'in': '00:00:00.000', 
-        'out': format_time(duration_secs)
+        'out': format_time(total_duration_secs)
     })
     SubElement(tractor, 'property', {'name': 'shotcut'}).text = '1'
     SubElement(tractor, 'property', {'name': 'shotcut:projectAudioChannels'}).text = '2'
@@ -285,31 +297,43 @@ def create_mlt_file(input_video, silences, video_info, min_segment_duration=0.1)
     print(f"Generated MLT file: {mlt_path}")
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <video_file> [onset_db] [offset_db] [min_duration_ms]")
-        print("  onset_db:  Threshold for sound onset (silence end) (e.g., -50, default: -50).")
-        print("  offset_db: Threshold for sound offset (silence start) (e.g., -50, default: -50).")
-        print("  min_duration_ms: Minimum segment duration in ms (e.g., 100, default: 100).")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Generate an .mlt file for shotcut by slicing up videos at audio thresholds.")
+    parser.add_argument('video_files', nargs='+', help="One or more video files to process.")
+    parser.add_argument('-o', '--output', help="Output MLT file path. Defaults to the first video's name with .mlt extension.")
+    parser.add_argument('--onset-db', type=int, default=-50, help="Threshold for sound onset (silence end) in dB (default: -50).")
+    parser.add_argument('--offset-db', type=int, default=-50, help="Threshold for sound offset (silence start) in dB (default: -50).")
+    parser.add_argument('--min-duration-ms', type=int, default=100, help="Minimum segment duration in ms (default: 100).")
+    
+    args = parser.parse_args()
+
+    min_segment_duration = args.min_duration_ms / 1000.0
+    
+    video_data = []
+    for input_video in args.video_files:
+        if not os.path.exists(input_video):
+            print(f"Error: File not found at {input_video}")
+            continue
         
-    input_video = sys.argv[1]
-    onset_threshold = sys.argv[2] if len(sys.argv) > 2 else "-50"
-    offset_threshold = sys.argv[3] if len(sys.argv) > 3 else "-50"
-    min_duration_ms = int(sys.argv[4]) if len(sys.argv) > 4 else 100
-    min_segment_duration = min_duration_ms / 1000.0
-    
-    if not os.path.exists(input_video):
-        print(f"Error: File not found at {input_video}")
-        sys.exit(1)
+        print(f"Processing {input_video}...")
+        silences = detect_silences(input_video, offset_threshold=f"{args.offset_db}dB", onset_threshold=f"{args.onset_db}dB")
+        print(f"Found {len(silences)} silence(s).")
         
-    silences = detect_silences(input_video, offset_threshold=f"{offset_threshold}dB", onset_threshold=f"{onset_threshold}dB")
-    print(f"Found {len(silences)} silence(s).")
-    
-    print("Getting video info...")
-    video_info = get_video_info(input_video)
-    
+        print("Getting video info...")
+        video_info = get_video_info(input_video)
+        
+        segments = calculate_segments(video_info['duration'], silences, min_segment_duration)
+        video_data.append((input_video, segments, video_info))
+
+    if not video_data:
+        print("No valid video files processed.")
+        sys.exit(1)
+
+    output_mlt_path = args.output
+    if not output_mlt_path:
+        output_mlt_path = os.path.splitext(args.video_files[0])[0] + '.mlt'
+
     print("Creating MLT file...")
-    create_mlt_file(input_video, silences, video_info, min_segment_duration=min_segment_duration)
+    create_mlt_file(video_data, output_mlt_path)
 
 if __name__ == '__main__':
     main()
