@@ -62,7 +62,7 @@ def generate_file_hash(filepath):
         hasher.update(buf)
     return hasher.hexdigest()
 
-def detect_silences(input_video, onset_threshold="-50dB", offset_threshold="-50dB", duration=0.25):
+def detect_silences(input_video, onset_threshold="-60dB", offset_threshold="-60dB", duration=0.25):
     """
     Detect silences using separate thresholds for sound offset and onset.
     Returns a list of (offset, onset) tuples for silent sections.
@@ -300,8 +300,8 @@ def main():
     parser = argparse.ArgumentParser(description="Generate an .mlt file for shotcut by slicing up videos at audio thresholds.")
     parser.add_argument('video_files', nargs='+', help="One or more video files to process.")
     parser.add_argument('-o', '--output', help="Output MLT file path. Defaults to the first video's name with .mlt extension.")
-    parser.add_argument('--onset-db', type=int, default=-50, help="Threshold for sound onset (silence end) in dB (default: -50).")
-    parser.add_argument('--offset-db', type=int, default=-50, help="Threshold for sound offset (silence start) in dB (default: -50).")
+    parser.add_argument('--onset-db', type=int, default=-60, help="Threshold for sound onset (silence end) in dB (default: -60).")
+    parser.add_argument('--offset-db', type=int, default=-60, help="Threshold for sound offset (silence start) in dB (default: -60).")
     parser.add_argument('--min-duration-ms', type=int, default=100, help="Minimum segment duration in ms (default: 100).")
     
     args = parser.parse_args()
