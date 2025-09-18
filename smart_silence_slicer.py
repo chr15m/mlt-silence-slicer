@@ -151,10 +151,22 @@ def format_time(seconds):
     
     return f"{h:02d}:{m:02d}:{s:02d}.{millis:03d}"
 
-def calculate_segments(duration_secs, silences, min_segment_duration=0.1):
+def calculate_segments(duration_secs, silences, min_segment_duration=0.1, delete_silence=False):
     """
     Calculate video segments based on silence points.
     """
+    if delete_silence:
+        audible_segments = []
+        last_end = 0.0
+        for start, end in silences:
+            if start > last_end:
+                audible_segments.append((last_end, start))
+            last_end = end
+        if duration_secs > last_end:
+            audible_segments.append((last_end, duration_secs))
+        
+        return [seg for seg in audible_segments if seg[1] - seg[0] >= min_segment_duration]
+
     # Create split points from silences
     split_points = {0.0, duration_secs}
     for start, end in silences:
@@ -227,39 +239,51 @@ def create_mlt_file(video_data, mlt_path):
     background = SubElement(root, 'playlist', {'id': 'background'})
     SubElement(background, 'entry', {'producer': 'black', 'in': '00:00:00.000', 'out': format_time(total_duration_secs)})
 
-    # Create a chain for each video file first
-    for chain_idx, (input_video, segments, video_info) in enumerate(video_data):
+    # Create a separate chain for EACH segment entry (like Shotcut does)
+    chain_idx = 0
+    chains_info = []  # Store info about each chain for playlist creation
+    
+    for video_idx, (input_video, segments, video_info) in enumerate(video_data):
         video_filename = os.path.basename(input_video)
         video_hash = generate_file_hash(input_video)
         duration_secs = video_info['duration']
-
-        chain = SubElement(root, 'chain', {'id': f'chain{chain_idx}', 'out': format_time(duration_secs)})
-        SubElement(chain, 'property', {'name': 'length'}).text = format_time(duration_secs)
-        SubElement(chain, 'property', {'name': 'eof'}).text = 'pause'
-        SubElement(chain, 'property', {'name': 'resource'}).text = video_filename
-        SubElement(chain, 'property', {'name': 'mlt_service'}).text = 'avformat-novalidate'
-        SubElement(chain, 'property', {'name': 'seekable'}).text = '1'
-        SubElement(chain, 'property', {'name': 'audio_index'}).text = '1'
-        SubElement(chain, 'property', {'name': 'video_index'}).text = '0'
-        SubElement(chain, 'property', {'name': 'mute_on_pause'}).text = '0'
-        SubElement(chain, 'property', {'name': 'shotcut:hash'}).text = video_hash
-        SubElement(chain, 'property', {'name': 'ignore_points'}).text = '0'
-        SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = video_filename
-        SubElement(chain, 'property', {'name': 'xml'}).text = 'was here'
+        frame_duration = video_info['frame_rate_den'] / video_info['frame_rate_num']
+        
+        # Create a chain for each segment of this video
+        for seg_idx, (start, end) in enumerate(segments):
+            chain = SubElement(root, 'chain', {'id': f'chain{chain_idx}', 'out': format_time(duration_secs)})
+            SubElement(chain, 'property', {'name': 'length'}).text = format_time(duration_secs)
+            SubElement(chain, 'property', {'name': 'eof'}).text = 'pause'
+            SubElement(chain, 'property', {'name': 'resource'}).text = video_filename
+            SubElement(chain, 'property', {'name': 'mlt_service'}).text = 'avformat-novalidate'
+            SubElement(chain, 'property', {'name': 'seekable'}).text = '1'
+            SubElement(chain, 'property', {'name': 'audio_index'}).text = '1'
+            SubElement(chain, 'property', {'name': 'video_index'}).text = '0'
+            SubElement(chain, 'property', {'name': 'mute_on_pause'}).text = '0'
+            SubElement(chain, 'property', {'name': 'shotcut:hash'}).text = video_hash
+            SubElement(chain, 'property', {'name': 'ignore_points'}).text = '0'
+            SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = video_filename
+            SubElement(chain, 'property', {'name': 'xml'}).text = 'was here'
+            
+            # Store info for playlist creation
+            is_last = (seg_idx == len(segments) - 1)
+            out_time = end if is_last else end - frame_duration
+            if out_time < start:
+                out_time = start
+            chains_info.append((f'chain{chain_idx}', start, out_time))
+            chain_idx += 1
 
     playlist = SubElement(root, 'playlist', {'id': 'playlist0', 'title': 'V1'})
     SubElement(playlist, 'property', {'name': 'shotcut:video'}).text = '1'
     SubElement(playlist, 'property', {'name': 'shotcut:name'}).text = 'V1'
     
-    # Then, create the playlist entries that refer to the chains
-    for chain_idx, (input_video, segments, video_info) in enumerate(video_data):
-        frame_duration = video_info['frame_rate_den'] / video_info['frame_rate_num']
-        for i, (start, end) in enumerate(segments):
-            is_last = (i == len(segments) - 1)
-            out_time = end if is_last else end - frame_duration
-            if out_time < start:
-                out_time = start
-            SubElement(playlist, 'entry', {'producer': f'chain{chain_idx}', 'in': format_time(start), 'out': format_time(out_time)})
+    # Create playlist entries using the stored chain info
+    for chain_id, start, out_time in chains_info:
+        SubElement(playlist, 'entry', {
+            'producer': chain_id, 
+            'in': format_time(start), 
+            'out': format_time(out_time)
+        })
 
     tractor = SubElement(root, 'tractor', {
         'id': 'tractor0', 
@@ -303,6 +327,7 @@ def main():
     parser.add_argument('--onset-db', type=int, default=-60, help="Threshold for sound onset (silence end) in dB (default: -60).")
     parser.add_argument('--offset-db', type=int, default=-60, help="Threshold for sound offset (silence start) in dB (default: -60).")
     parser.add_argument('--min-duration-ms', type=int, default=100, help="Minimum segment duration in ms (default: 100).")
+    parser.add_argument('--delete-silence', action='store_true', help="Remove silent segments entirely.")
     
     args = parser.parse_args()
 
@@ -321,7 +346,7 @@ def main():
         print("Getting video info...")
         video_info = get_video_info(input_video)
         
-        segments = calculate_segments(video_info['duration'], silences, min_segment_duration)
+        segments = calculate_segments(video_info['duration'], silences, min_segment_duration, delete_silence=args.delete_silence)
         video_data.append((input_video, segments, video_info))
 
     if not video_data:
