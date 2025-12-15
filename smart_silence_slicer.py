@@ -116,16 +116,23 @@ def get_video_info(input_video):
         'ffprobe',
         '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,r_frame_rate:format=duration',
+        '-show_entries', 'stream=width,height,r_frame_rate,duration:format=duration',
         '-of', 'json',
         input_video
     ]
     
     result = subprocess.run(command, capture_output=True, text=True, check=True)
     data = json.loads(result.stdout)
+    print(f"DEBUG ffprobe output: {data}")
     info = data['streams'][0]
     
-    duration_val = float(data['format']['duration'])
+    # Try format duration first, fall back to stream duration
+    duration_val = None
+    if 'format' in data and 'duration' in data['format']:
+        duration_val = float(data['format']['duration'])
+    elif 'duration' in info:
+        duration_val = float(info['duration'])
+    
     frame_rate_str = info['r_frame_rate']
     num, den = map(int, frame_rate_str.split('/'))
     
@@ -331,21 +338,43 @@ def main():
     
     args = parser.parse_args()
 
+    # Check all files exist first
+    for input_video in args.video_files:
+        if not os.path.exists(input_video):
+            print(f"Error: File not found at {input_video}")
+            sys.exit(1)
+
+    # Check all files have duration metadata
+    print("Checking video metadata...")
+    files_missing_duration = []
+    video_infos = {}
+    for input_video in args.video_files:
+        video_info = get_video_info(input_video)
+        video_infos[input_video] = video_info
+        if video_info['duration'] is None:
+            files_missing_duration.append(input_video)
+    
+    if files_missing_duration:
+        print("\nError: The following files are missing duration metadata:")
+        for f in files_missing_duration:
+            print(f"  {f}")
+        print("\nTo fix, remux each file with ffmpeg:")
+        for f in files_missing_duration:
+            base, ext = os.path.splitext(f)
+            fixed = f"{base}_fixed{ext}"
+            print(f"  ffmpeg -i \"{f}\" -c copy \"{fixed}\"")
+        print("\nThen use the fixed files instead.")
+        sys.exit(1)
+
     min_segment_duration = args.min_duration_ms / 1000.0
     
     video_data = []
     for input_video in args.video_files:
-        if not os.path.exists(input_video):
-            print(f"Error: File not found at {input_video}")
-            continue
-        
         print(f"Processing {input_video}...")
         silences = detect_silences(input_video, offset_threshold=f"{args.offset_db}dB", onset_threshold=f"{args.onset_db}dB")
         print(f"Found {len(silences)} silence(s).")
         
-        print("Getting video info...")
-        video_info = get_video_info(input_video)
-        
+        video_info = video_infos[input_video]
         segments = calculate_segments(video_info['duration'], silences, min_segment_duration, delete_silence=args.delete_silence)
         video_data.append((input_video, segments, video_info))
 
