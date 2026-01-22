@@ -62,12 +62,13 @@ def generate_file_hash(filepath):
         hasher.update(buf)
     return hasher.hexdigest()
 
-def detect_silences(input_video, onset_threshold="-60dB", offset_threshold="-60dB", duration=0.25):
+def detect_silences(input_video, onset_threshold="-60dB", offset_threshold="-60dB", duration=0.25, padding=0.0, min_audible=0.1):
     """
     Detect silences using separate thresholds for sound offset and onset.
-    Returns a list of (offset, onset) tuples for silent sections.
+    Returns a list of (offset, onset) tuples for silent sections using a 
+    state-machine counter to handle overlapping segments and padding.
     """
-    # Get sound offsets (silence starts) with the sensitive threshold
+    # Get sound offsets (silence starts)
     offset_command = [
         'ffmpeg', '-i', input_video,
         '-af', f'silencedetect=noise={offset_threshold}:d={duration}',
@@ -75,7 +76,7 @@ def detect_silences(input_video, onset_threshold="-60dB", offset_threshold="-60d
     ]
     offset_times = _run_ffmpeg_and_get_times(offset_command, r'silence_start: (\d+\.?\d*)', "Detecting offsets")
 
-    # Get sound onsets (silence ends) with the louder threshold
+    # Get sound onsets (silence ends)
     onset_command = [
         'ffmpeg', '-i', input_video,
         '-af', f'silencedetect=noise={onset_threshold}:d={duration}',
@@ -83,29 +84,44 @@ def detect_silences(input_video, onset_threshold="-60dB", offset_threshold="-60d
     ]
     onset_times = _run_ffmpeg_and_get_times(onset_command, r'silence_end: (\d+\.?\d*)', "Detecting onsets")
 
-    # Pair up the offset and onset times
+    # Create events: onset = +1 (audio starts), offset = -1 (audio ends)
+    # We use an "audible counter". 0 = silent, >0 = audible.
+    events = []
+    for t in onset_times:
+        events.append((t - padding, 1))
+    for t in offset_times:
+        events.append((t + padding, -1))
+    
+    events.sort()
+
+    # Filter out short audible sections: Onset (+1) followed by Offset (-1) < min_audible
+    filtered_events = []
+    i = 0
+    while i < len(events):
+        if i < len(events) - 1:
+            t1, c1 = events[i]
+            t2, c2 = events[i+1]
+            if c1 == 1 and c2 == -1 and (t2 - t1) < min_audible:
+                i += 2 # Skip both
+                continue
+        filtered_events.append(events[i])
+        i += 1
+
     silences = []
-    offsets_iter = iter(offset_times)
-    onsets_iter = iter(onset_times)
-    
-    current_offset = next(offsets_iter, None)
-    current_onset = next(onsets_iter, None)
-    
-    while current_offset is not None and current_onset is not None:
-        # Find an onset time that is after the current offset time
-        while current_onset is not None and current_onset <= current_offset:
-            current_onset = next(onsets_iter, None)
+    audible_counter = 0
+    last_offset = 0.0
 
-        if current_onset is None:
-            break  # No more valid onset times
+    for t, change in filtered_events:
+        prev_counter = audible_counter
+        audible_counter = max(0, audible_counter + change)
 
-        # We have a valid pair
-        silences.append((current_offset, current_onset))
+        if prev_counter == 0 and audible_counter > 0:
+            # Transition from silent to audible: end of a silence
+            silences.append((last_offset, t))
+        elif prev_counter > 0 and audible_counter == 0:
+            # Transition from audible to silent: start of a silence
+            last_offset = t
 
-        # Find the next offset time that is after the current onset time
-        while current_offset is not None and current_offset <= current_onset:
-            current_offset = next(offsets_iter, None)
-            
     return silences
 
 def get_video_info(input_video):
@@ -162,10 +178,18 @@ def calculate_segments(duration_secs, silences, min_segment_duration=0.1, delete
     """
     Calculate video segments based on silence points.
     """
+    # Clamp silence points to video duration
+    clamped_silences = []
+    for start, end in silences:
+        s = max(0.0, min(start, duration_secs))
+        e = max(0.0, min(end, duration_secs))
+        if e > s:
+            clamped_silences.append((s, e))
+
     if delete_silence:
         audible_segments = []
         last_end = 0.0
-        for start, end in silences:
+        for start, end in clamped_silences:
             if start > last_end:
                 audible_segments.append((last_end, start))
             last_end = end
@@ -176,7 +200,7 @@ def calculate_segments(duration_secs, silences, min_segment_duration=0.1, delete
 
     # Create split points from silences
     split_points = {0.0, duration_secs}
-    for start, end in silences:
+    for start, end in clamped_silences:
         split_points.add(start)
         split_points.add(end)
     
@@ -333,6 +357,7 @@ def main():
     parser.add_argument('-o', '--output', help="Output MLT file path. Defaults to the first video's name with .mlt extension.")
     parser.add_argument('--onset-db', type=int, default=-60, help="Threshold for sound onset (silence end) in dB (default: -60).")
     parser.add_argument('--offset-db', type=int, default=-60, help="Threshold for sound offset (silence start) in dB (default: -60).")
+    parser.add_argument('--segment-padding', type=float, default=0.0, help="Padding in seconds to add to audible segments (default: 0.0).")
     parser.add_argument('--min-duration-ms', type=int, default=100, help="Minimum segment duration in ms (default: 100).")
     parser.add_argument('--delete-silence', action='store_true', help="Remove silent segments entirely.")
     
@@ -371,7 +396,13 @@ def main():
     video_data = []
     for input_video in args.video_files:
         print(f"Processing {input_video}...")
-        silences = detect_silences(input_video, offset_threshold=f"{args.offset_db}dB", onset_threshold=f"{args.onset_db}dB")
+        silences = detect_silences(
+            input_video, 
+            offset_threshold=f"{args.offset_db}dB", 
+            onset_threshold=f"{args.onset_db}dB",
+            padding=args.segment_padding,
+            min_audible=min_segment_duration
+        )
         print(f"Found {len(silences)} silence(s).")
         
         video_info = video_infos[input_video]
