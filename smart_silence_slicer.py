@@ -177,6 +177,7 @@ def format_time(seconds):
 def calculate_segments(duration_secs, silences, min_segment_duration=0.1, delete_silence=False):
     """
     Calculate video segments based on silence points.
+    Returns (segments, clamped_silences)
     """
     # Clamp silence points to video duration
     clamped_silences = []
@@ -196,7 +197,7 @@ def calculate_segments(duration_secs, silences, min_segment_duration=0.1, delete
         if duration_secs > last_end:
             audible_segments.append((last_end, duration_secs))
         
-        return [seg for seg in audible_segments if seg[1] - seg[0] >= min_segment_duration]
+        return [seg for seg in audible_segments if seg[1] - seg[0] >= min_segment_duration], clamped_silences
 
     # Create split points from silences
     split_points = {0.0, duration_secs}
@@ -224,7 +225,7 @@ def calculate_segments(duration_secs, silences, min_segment_duration=0.1, delete
         start, end = filtered_points[i], filtered_points[i+1]
         if end > start:
             segments.append((start, end))
-    return segments
+    return segments, clamped_silences
 
 def create_mlt_file(video_data, mlt_path):
     """
@@ -234,7 +235,7 @@ def create_mlt_file(video_data, mlt_path):
         return
 
     first_video_info = video_data[0][2]
-    total_duration_secs = sum(end - start for _, segments, _ in video_data for start, end in segments)
+    total_duration_secs = sum(end - start for _, segments, _, _ in video_data for start, end in segments)
 
     root = Element('mlt', {
         'LC_NUMERIC': 'C', 
@@ -274,7 +275,7 @@ def create_mlt_file(video_data, mlt_path):
     chain_idx = 0
     chains_info = []  # Store info about each chain for playlist creation
     
-    for video_idx, (input_video, segments, video_info) in enumerate(video_data):
+    for video_idx, (input_video, segments, video_info, silences) in enumerate(video_data):
         video_filename = os.path.basename(input_video)
         video_hash = generate_file_hash(input_video)
         duration_secs = video_info['duration']
@@ -282,6 +283,10 @@ def create_mlt_file(video_data, mlt_path):
         
         # Create a chain for each segment of this video
         for seg_idx, (start, end) in enumerate(segments):
+            # Determine if this segment is silent
+            is_silent = any(abs(s - start) < 0.001 and abs(e - end) < 0.001 for s, e in silences)
+            caption = "S" if is_silent else video_filename
+
             chain = SubElement(root, 'chain', {'id': f'chain{chain_idx}', 'out': format_time(duration_secs)})
             SubElement(chain, 'property', {'name': 'length'}).text = format_time(duration_secs)
             SubElement(chain, 'property', {'name': 'eof'}).text = 'pause'
@@ -293,7 +298,7 @@ def create_mlt_file(video_data, mlt_path):
             SubElement(chain, 'property', {'name': 'mute_on_pause'}).text = '0'
             SubElement(chain, 'property', {'name': 'shotcut:hash'}).text = video_hash
             SubElement(chain, 'property', {'name': 'ignore_points'}).text = '0'
-            SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = video_filename
+            SubElement(chain, 'property', {'name': 'shotcut:caption'}).text = caption
             SubElement(chain, 'property', {'name': 'xml'}).text = 'was here'
             
             # Store info for playlist creation
@@ -406,8 +411,8 @@ def main():
         print(f"Found {len(silences)} silence(s).")
         
         video_info = video_infos[input_video]
-        segments = calculate_segments(video_info['duration'], silences, min_segment_duration, delete_silence=args.delete_silence)
-        video_data.append((input_video, segments, video_info))
+        segments, clamped_silences = calculate_segments(video_info['duration'], silences, min_segment_duration, delete_silence=args.delete_silence)
+        video_data.append((input_video, segments, video_info, clamped_silences))
 
     if not video_data:
         print("No valid video files processed.")
