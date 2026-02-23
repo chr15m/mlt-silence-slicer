@@ -362,9 +362,9 @@ def main():
     parser.add_argument('-o', '--output', help="Output MLT file path. Defaults to the first video's name with .mlt extension.")
     parser.add_argument('--onset-db', type=int, default=-60, help="Threshold for sound onset (silence end) in dB (default: -60).")
     parser.add_argument('--offset-db', type=int, default=-60, help="Threshold for sound offset (silence start) in dB (default: -60).")
-    parser.add_argument('--segment-padding', type=float, default=0.0, help="Padding in seconds to add to audible segments (default: 0.0).")
+    parser.add_argument('--segment-padding', type=float, default=0.125, help="Padding in seconds to add to audible segments (default: 0.125).")
     parser.add_argument('--min-duration-ms', type=int, default=100, help="Minimum segment duration in ms (default: 100).")
-    parser.add_argument('--delete-silence', action='store_true', help="Remove silent segments entirely.")
+    parser.add_argument('--keep-silence', action='store_true', help="Keep silent segments (default is to delete them).")
     
     args = parser.parse_args()
 
@@ -411,7 +411,7 @@ def main():
         print(f"Found {len(silences)} silence(s).")
         
         video_info = video_infos[input_video]
-        segments, clamped_silences = calculate_segments(video_info['duration'], silences, min_segment_duration, delete_silence=args.delete_silence)
+        segments, clamped_silences = calculate_segments(video_info['duration'], silences, min_segment_duration, delete_silence=not args.keep_silence)
         video_data.append((input_video, segments, video_info, clamped_silences))
 
     if not video_data:
